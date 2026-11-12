@@ -281,3 +281,30 @@ func TestAuthKitSecondFactorContextPreservesMacIdentity(t *testing.T) {
 		t.Fatal("missing native second-factor context")
 	}
 }
+
+func TestSMSSubmitPreservesRejectionWithoutExposingPrivateFields(t *testing.T) {
+	c := NewClient(headerProvider{})
+	c.smsPhoneID = 7
+	requests := 0
+	c.transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if r.Method != "POST" || r.URL.Path != "/auth/verify/phone/securitycode" {
+			t.Fatal("unexpected second-factor request")
+		}
+		body := `{"securityCode":{"tooManyCodesValidated":true,"securityCodeLocked":true},"serviceErrors":[{"code":"-21669","message":"owner@example.test 123456 private-token"}]}`
+		return &http.Response{StatusCode: 400, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	err := c.SubmitSMSCode("test-adsid", "test-idms", "123456")
+	var responseErr *SecondFactorError
+	if !errors.As(err, &responseErr) || responseErr.HTTPStatus != 400 || responseErr.Code != -21669 || !responseErr.TooManyCodesValidated || !responseErr.SecurityCodeLocked {
+		t.Fatal("lost Apple's verification rejection details")
+	}
+	if requests != 1 {
+		t.Fatal("retried a rejected verification code")
+	}
+	for _, private := range []string{"owner@example.test", "123456", "private-token"} {
+		if strings.Contains(err.Error(), private) {
+			t.Fatal("exposed private response fields")
+		}
+	}
+}
